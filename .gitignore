@@ -1,0 +1,42 @@
+node_modules/
+dist/
+.env
+.env.local
+.env.production
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.DS_Store
+*.log
+temp/
+tmp/
+uploads/
+*.mp4
+*.webm
+*.wav
+*.mp3
+
+# Build outputs
+.next/
+.nuxt/
+.cache/
+
+# LLM models
+.ollama/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Temp env variants
+.env.tmp
+.env.*.local
+
+# OS
+Thumbs.db
+Desktop.ini
