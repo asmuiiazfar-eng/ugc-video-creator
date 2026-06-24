@@ -8,6 +8,31 @@ from app.config import get_settings
 settings = get_settings()
 
 
+# ── Sprint 3: credit packages (one-time Stripe purchases) ──────────────
+# Each package maps a plan slug to its credit amount and price in USD cents.
+# Frontend sends `{plan: "starter"|"creator"|"pro"}` to /credits/checkout.
+CREDIT_PACKAGES: dict[str, dict] = {
+    "starter": {
+        "name": "Starter Pack",
+        "credits": 100,
+        "price_cents": 100,   # $1.00
+    },
+    "creator": {
+        "name": "Creator Pack",
+        "credits": 500,
+        "price_cents": 400,   # $4.00
+    },
+    "pro": {
+        "name": "Pro Pack",
+        "credits": 1000,
+        "price_cents": 700,   # $7.00
+    },
+}
+
+# Below this balance (after a render), users are nudged to top up.
+LOW_CREDIT_THRESHOLD: int = 20
+
+
 async def get_balance(user_id: str, db: AsyncSession) -> int:
     """Get the current credit balance for a user."""
     result = await db.execute(select(User).where(User.id == user_id))

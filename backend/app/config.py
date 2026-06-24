@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     # Google OAuth (Issue 6 fix)
     GOOGLE_CLIENT_ID: str = ""
 
+    # Resend (transactional email)
+    RESEND_API_KEY: str = ""
+    FROM_EMAIL: str = "noreply@ugcstudio.app"
+
     # ====== Kie.ai — Unified API Key ======
     # Covers: LLM Chat, Video (Veo/Kling), Image (GPT Image 2), TTS (ElevenLabs)
     KIEAI_API_KEY: str = ""

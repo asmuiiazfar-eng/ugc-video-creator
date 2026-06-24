@@ -9,6 +9,7 @@ from app.config import get_settings
 from app.database import get_db
 from app.models import User
 from app.core.deps import get_current_user
+from app.core.email import send_welcome_email
 
 settings = get_settings()
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -80,6 +81,8 @@ async def signup(request: SignupRequest, db: AsyncSession = Depends(get_db)):
         user = User(id=user_id, email=email, credits=10, plan="free")
         db.add(user)
         await db.flush()
+        # Sprint 3: send welcome email to new signups (best-effort).
+        send_welcome_email(email)
 
     return AuthResponse(
         access_token=data.get("access_token", ""),
@@ -164,6 +167,8 @@ async def google_login(request: GoogleAuthRequest, db: AsyncSession = Depends(ge
         user = User(id=user_id, email=email, credits=10, plan="free")
         db.add(user)
         await db.flush()
+        # Sprint 3: send welcome email to new Google sign-ins (best-effort).
+        send_welcome_email(email)
 
     # 4. Return the access token (prefer Supabase token if provided)
     return AuthResponse(

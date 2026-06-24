@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import engine, Base
-from app.api import auth, projects, scenes, avatars, voices, scripts, backgrounds, credits
+from app.api import auth, projects, scenes, avatars, voices, scripts, backgrounds, credits, webhooks
 
 
 @asynccontextmanager
@@ -43,6 +43,7 @@ app.include_router(voices.router)
 app.include_router(scripts.router)
 app.include_router(backgrounds.router)
 app.include_router(credits.router)
+app.include_router(webhooks.router)
 
 
 @app.get("/health")

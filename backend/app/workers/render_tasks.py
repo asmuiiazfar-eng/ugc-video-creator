@@ -28,6 +28,7 @@ from app.models import (
     SceneRenderStatus,
     Avatar,
     Background,
+    User,
 )
 from app.core.kieai import generate_scene as kieai_generate_scene
 from app.core.kieai import text_to_speech
@@ -37,7 +38,8 @@ from app.core.render import (
     generate_ass_captions,
     download_clip,
 )
-from app.core.credits import deduct_credits
+from app.core.credits import deduct_credits, get_balance, LOW_CREDIT_THRESHOLD
+from app.core.email import send_render_complete_email, send_low_credits_email
 
 
 def run_async(coro):
@@ -79,6 +81,12 @@ async def _resolve_background_url(background_id: str, db) -> str:
     return ""
 
 
+async def _fetch_user(user_id: str, db) -> User | None:
+    """Fetch the user row for email/balance lookups. Returns None if missing."""
+    result = await db.execute(select(User).where(User.id == user_id))
+    return result.scalar_one_or_none()
+
+
 @shared_task(bind=True, max_retries=2)
 def render_project(self, project_id: str):
     """Celery task to render a full project.
@@ -115,6 +123,11 @@ def render_project(self, project_id: str):
                 db.add(project)
                 await db.flush()
                 raise ValueError("Insufficient credits")
+
+            # Sprint 3: low-credit warning after deduction.
+            user_row = await _fetch_user(str(project.user_id), db)
+            if user_row and user_row.credits < LOW_CREDIT_THRESHOLD:
+                send_low_credits_email(user_row.email, user_row.credits)
 
             # Issue 3 fix: resolve avatar URL once for the whole project.
             avatar_url = await _resolve_avatar_url(project, db)
@@ -223,6 +236,15 @@ def render_project(self, project_id: str):
             db.add(project)
             await db.flush()
 
+            # Sprint 3: notify the user that their render is ready.
+            if user_row:
+                send_render_complete_email(
+                    user_row.email,
+                    project.title,
+                    output_url=output_url or None,
+                    success=True,
+                )
+
             return {
                 "project_id": project_id,
                 "status": "completed",
@@ -245,6 +267,16 @@ def render_project(self, project_id: str):
                     project.updated_at = datetime.now(timezone.utc)
                     db.add(project)
                     await db.flush()
+
+                    # Sprint 3: notify the user that their render failed.
+                    user_row = await _fetch_user(str(project.user_id), db)
+                    if user_row:
+                        send_render_complete_email(
+                            user_row.email,
+                            project.title,
+                            output_url=None,
+                            success=False,
+                        )
 
         run_async(_mark_failed())
         raise self.retry(exc=exc, countdown=30)
