@@ -57,6 +57,8 @@ class Project(Base):
     duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     avatar_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("avatars.id"), nullable=True)
     voice_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    voice_speed: Mapped[float | None] = mapped_column(Float, default=1.0, nullable=True)
+    voice_pitch: Mapped[str | None] = mapped_column(String(50), default="normal", nullable=True)
     thumbnail_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     output_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     credit_cost: Mapped[int | None] = mapped_column(Integer, nullable=True)

@@ -297,18 +297,37 @@ async def generate_scene(
     avatar_url: str,
     audio_url: str,
     background_url: str,
+    scene_text: Optional[str] = None,
 ) -> dict:
     """Generate a video scene with avatar, audio, and background.
 
-    Uses Kie.ai Veo API internally.
+    Issue 5 fix: Veo expects a NATURAL LANGUAGE prompt — it cannot interpret
+    raw URLs embedded in the prompt text. The avatar is now passed via the
+    `imageUrls` parameter (first-and-last-frames-to-video mode), and the prompt
+    describes the desired scene in plain language derived from the scene text.
     """
-    prompt = (
-        f"A person speaking naturally on camera. "
-        f"The background shows: {background_url}. "
-        f"The person has avatar reference: {avatar_url}. "
-        f"Sync lip movements to the provided audio."
-    )
-    result = await generate_video(prompt=prompt, image_url=avatar_url)
+    # Build a descriptive, natural-language prompt. Prefer the scene's actual
+    # script text (which is already meaningful) and layer on staging cues.
+    if scene_text:
+        spoken = scene_text.strip()
+        prompt = (
+            f"A friendly content creator speaks directly to camera, delivering "
+            f"this line with natural energy and clear lip movements: \"{spoken}\". "
+            f"Natural studio lighting, steady medium close-up framing, "
+            f"professional UGC advertisement style."
+        )
+    else:
+        prompt = (
+            "A person speaking naturally and confidently to camera in a "
+            "professional UGC advertisement style. Natural lip movements, "
+            "steady medium close-up framing, soft studio lighting."
+        )
+
+    # The avatar image drives the on-camera person via image-to-video mode.
+    # Only pass a real URL — never a UUID or DB id.
+    image_input = avatar_url if avatar_url.startswith("http") else None
+
+    result = await generate_video(prompt=prompt, image_url=image_input)
     task_id = result.get("data", {}).get("taskId")
     if not task_id:
         raise Exception(f"Scene generation failed: {result.get('msg', 'no taskId')}")
@@ -316,8 +335,8 @@ async def generate_scene(
     data = poll_result.get("data", {})
 
     video_url = (
-        data.get("videoInfo", {}).get("resultUrls", [None])[0] or
-        data.get("videoInfo", {}).get("videoUrl")
+        data.get("videoInfo", {}).get("resultUrls", [None])[0]
+        or data.get("videoInfo", {}).get("videoUrl")
     )
     return {"video_url": video_url or "", "task_id": task_id}
 

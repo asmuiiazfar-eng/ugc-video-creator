@@ -3,6 +3,7 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from httpx import AsyncClient as HTTPXClient
+from typing import Optional
 
 from app.config import get_settings
 from app.database import get_db
@@ -21,6 +22,18 @@ class SignupRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: str
     password: str
+
+
+class GoogleAuthRequest(BaseModel):
+    """Issue 6 fix: payload for Google OAuth sign-in.
+
+    The frontend obtains a Google ID token (via Supabase OAuth or the Google
+    Identity SDK) and sends it here. We verify it against Google's tokeninfo
+    endpoint and upsert the local user.
+    """
+
+    id_token: str
+    access_token: Optional[str] = None
 
 
 class AuthResponse(BaseModel):
@@ -108,6 +121,53 @@ async def login(request: LoginRequest, db: AsyncSession = Depends(get_db)):
 
     return AuthResponse(
         access_token=data.get("access_token", ""),
+        user_id=user_id,
+    )
+
+
+@router.post("/google", response_model=AuthResponse)
+async def google_login(request: GoogleAuthRequest, db: AsyncSession = Depends(get_db)):
+    """Issue 6 fix: Google OAuth login.
+
+    Verifies the Google ID token via Google's tokeninfo endpoint, then upserts
+    the user in the local DB (with 10 free credits for new accounts). The
+    Supabase access token (if provided) is returned for downstream API calls;
+    otherwise the Google ID token itself is returned.
+    """
+    # 1. Verify the Google ID token
+    tokeninfo_url = "https://www.googleapis.com/oauth2/v3/tokeninfo"
+    async with HTTPXClient() as client:
+        resp = await client.get(
+            tokeninfo_url,
+            params={"id_token": request.id_token},
+        )
+        if resp.status_code != 200:
+            raise HTTPException(status_code=401, detail="Invalid Google token")
+
+        payload = resp.json()
+
+    # 2. Optional: validate audience matches our client id
+    if settings.GOOGLE_CLIENT_ID:
+        aud = payload.get("aud")
+        if aud and aud != settings.GOOGLE_CLIENT_ID:
+            raise HTTPException(status_code=401, detail="Google token audience mismatch")
+
+    user_id = payload.get("sub")
+    email = payload.get("email")
+    if not user_id or not email:
+        raise HTTPException(status_code=400, detail="Google token missing sub/email")
+
+    # 3. Upsert the local user
+    result = await db.execute(select(User).where(User.id == user_id))
+    existing = result.scalar_one_or_none()
+    if not existing:
+        user = User(id=user_id, email=email, credits=10, plan="free")
+        db.add(user)
+        await db.flush()
+
+    # 4. Return the access token (prefer Supabase token if provided)
+    return AuthResponse(
+        access_token=request.access_token or request.id_token,
         user_id=user_id,
     )
 

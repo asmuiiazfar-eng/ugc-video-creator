@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     STRIPE_SECRET_KEY: str = ""
     STRIPE_WEBHOOK_SECRET: str = ""
 
+    # Google OAuth (Issue 6 fix)
+    GOOGLE_CLIENT_ID: str = ""
+
     # ====== Kie.ai — Unified API Key ======
     # Covers: LLM Chat, Video (Veo/Kling), Image (GPT Image 2), TTS (ElevenLabs)
     KIEAI_API_KEY: str = ""

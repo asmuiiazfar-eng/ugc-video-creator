@@ -185,18 +185,24 @@ async def rerender_scene(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Trigger a rerender of a scene by resetting its render status."""
+    """Reset a scene's render status and re-dispatch the project render."""
     result = await db.execute(
         select(Scene).where(Scene.id == scene_id)
     )
     scene = result.scalar_one_or_none()
     if not scene:
         raise HTTPException(status_code=404, detail="Scene not found")
-    await _verify_project_access(str(scene.project_id), current_user, db)
+    project = await _verify_project_access(str(scene.project_id), current_user, db)
 
     scene.render_status = SceneRenderStatus.pending
     scene.render_url = None
     scene.updated_at = datetime.now(timezone.utc)
     db.add(scene)
     await db.flush()
+
+    # Re-dispatch the project render task so the scene is regenerated
+    # and the project is re-stitched (Issue 1 fix).
+    from app.workers.render_tasks import render_project
+    render_project.delay(str(project.id))
+
     return _scene_to_response(scene)

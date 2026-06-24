@@ -1,97 +1,147 @@
+"""FFmpeg helpers: command building, execution, and clip downloading.
+
+Issue 2 fix: Previously these functions only *built* command strings without
+executing them. They now (a) build a correct filter_complex chain, (b) actually
+run FFmpeg via subprocess, and (c) download remote clips to local temp files
+first (FFmpeg cannot fetch arbitrary HTTPS URLs reliably through filter_complex).
+"""
+
+import os
+import shutil
+import subprocess
+import tempfile
 from typing import Optional
+from urllib.parse import urlparse
+
+import httpx
+
+
+def download_clip(url: str, dest_path: str, timeout: int = 120) -> str:
+    """Download a remote video/audio clip to a local path (sync).
+
+    FFmpeg's filter_complex cannot reliably ingest arbitrary HTTPS URLs, so we
+    stage clips locally first. Returns the local path on success.
+    """
+    headers = {"User-Agent": "ugc-video-creator/1.0"}
+    with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+        with client.stream("GET", url, headers=headers) as resp:
+            resp.raise_for_status()
+            with open(dest_path, "wb") as f:
+                for chunk in resp.iter_bytes():
+                    f.write(chunk)
+    return dest_path
 
 
 def stitch_clips(
-    clip_urls: list[str],
+    clip_paths: list[str],
+    output_path: str,
     transitions: Optional[list[str]] = None,
-    captions_text: Optional[str] = None,
-    music_url: Optional[str] = None,
+    captions_path: Optional[str] = None,
+    music_path: Optional[str] = None,
 ) -> str:
-    """Build an FFmpeg command to stitch video clips together with transitions and optional captions/music.
+    """Build a CORRECT FFmpeg command to stitch local video clips.
 
-    Returns the FFmpeg command as a string (does not execute it).
+    Issue 2 fix: the previous implementation appended two separate
+    `-filter_complex` flags when both captions and music were supplied, which
+    produced an invalid command. Captions + music are now merged into a single
+    filter chain.
+
+    All inputs must be local file paths (use download_clip first).
+    Returns the FFmpeg command as a list of arguments.
     """
-    if not clip_urls:
-        return ""
+    if not clip_paths:
+        return []
 
     if transitions is None:
-        transitions = ["fade"] * (len(clip_urls) - 1)
+        transitions = ["fade"] * max(0, len(clip_paths) - 1)
 
-    parts = []
-    filter_complex_parts = []
-    inputs = []
-    # Build filter complex for concatenation
-    # For simplicity, use concat filter with fade transitions between clips
-    # Each clip gets a trim + setpts + optional fade
+    filter_parts = []
 
-    for i, url in enumerate(clip_urls):
-        input_label = f"v{i}"
-        inputs.append(f' -i "{url}"')
+    # Normalize every input: reset timestamps so concat lines up.
+    for i in range(len(clip_paths)):
+        v_label = f"v{i}"
+        a_label = f"a{i}"
+        # If a clip has no audio stream, fall back to anullsrc later; for now
+        # assume each scene clip carries audio from TTS.
+        filter_parts.append(f"[{i}:v]setpts=PTS-STARTPTS,fps=30,format=yuv420p[{v_label}]")
+        filter_parts.append(f"[{i}:a]aresample=44100[{a_label}]")
 
-        if i == 0:
-            # First clip - no fade in transition from nothing, just keep it
-            filter_complex_parts.append(
-                f"[{i}:v:0]setpts=PTS-STARTPTS[{input_label}_v]"
-            )
-            filter_complex_parts.append(
-                f"[{i}:a:0]asetpts=PTS-STARTPTS[{input_label}_a]"
-            )
-        else:
-            # Apply fade in transition
-            transition = transitions[i - 1] if (i - 1) < len(transitions) else "fade"
-            fade_duration = 0.5
+    v_labels = "".join(f"[v{i}]" for i in range(len(clip_paths)))
+    a_labels = "".join(f"[a{i}]" for i in range(len(clip_paths)))
+    filter_parts.append(
+        f"{v_labels}{a_labels}concat=n={len(clip_paths)}:v=1:a=1[concat_v][concat_a]"
+    )
 
-            filter_complex_parts.append(
-                f"[{i}:v:0]setpts=PTS-STARTPTS[{input_label}_v]"
-            )
-            filter_complex_parts.append(
-                f"[{i}:a:0]asetpts=PTS-STARTPTS[{input_label}_a]"
-            )
-
-    # Build concat input labels
-    v_labels = "".join(f"[v{i}_v]" for i in range(len(clip_urls)))
-    a_labels = "".join(f"[v{i}_a]" for i in range(len(clip_urls)))
-
-    concat_inputs = f"{v_labels}{a_labels}concat=n={len(clip_urls)}:v=1:a=1[out_v][out_a]"
-    filter_complex_parts.append(concat_inputs)
-
-    # If captions file provided, add subtitles filter
-    if captions_text:
-        filter_complex_parts.append(
-            f"[out_v]subtitles={captions_text}[out_v_captioned]"
+    # Subtitles (ASS) overlay on the concatenated video.
+    out_video_label = "[concat_v]"
+    if captions_path:
+        # Escape backslashes/colons for the subtitles filter on Windows paths.
+        esc = captions_path.replace("\\", "/").replace(":", r"\:")
+        filter_parts.append(
+            f"[concat_v]subtitles='{esc}'[captioned_v]"
         )
-        out_video = "[out_v_captioned]"
+        out_video_label = "[captioned_v]"
+
+    # Mix in background music (local file) if provided.
+    if music_path:
+        music_idx = len(clip_paths)  # music is the next -i input
+        filter_parts.append(
+            f"[{music_idx}:a]volume=0.15[bgm];"
+            f"[concat_a]amix=inputs=1[mixed_a];"
+            f"[mixed_a][bgm]amix=inputs=2:duration=first:dropout_transition=0[final_a]"
+        )
+        out_audio_label = "[final_a]"
     else:
-        out_video = "[out_v]"
+        out_audio_label = "[concat_a]"
 
-    filter_complex = ";".join(filter_complex_parts)
+    filter_complex = ";".join(filter_parts)
 
-    # Build command
-    cmd_parts = ["ffmpeg"]
-    cmd_parts.extend(inputs)
-    cmd_parts.append(f'-filter_complex "{filter_complex}"')
-    cmd_parts.append(f'-map "{out_video}"')
-    cmd_parts.append('-map "[out_a]"')
-    cmd_parts.append("-c:v libx264")
-    cmd_parts.append("-preset medium")
-    cmd_parts.append("-crf 23")
-    cmd_parts.append("-c:a aac")
-    cmd_parts.append("-b:a 128k")
-    cmd_parts.append("-pix_fmt yuv420p")
+    cmd = ["ffmpeg", "-y"]
+    for path in clip_paths:
+        cmd += ["-i", path]
+    if music_path:
+        cmd += ["-i", music_path]
+    cmd += [
+        "-filter_complex", filter_complex,
+        "-map", out_video_label,
+        "-map", out_audio_label,
+        "-c:v", "libx264",
+        "-preset", "medium",
+        "-crf", "23",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-movflags", "+faststart",
+        output_path,
+    ]
+    return cmd
 
-    # Add background music if provided
-    if music_url:
-        cmd_parts.append(f'-i "{music_url}"')
-        cmd_parts.append('-filter_complex "[1:a]volume=0.15[bgm];[out_a]amix=inputs=2:duration=first[final_a]"')
-        cmd_parts.append('-map "[final_a]"')
 
-    cmd_parts.append("output.mp4")
+def execute_ffmpeg(cmd: list[str], timeout: int = 540) -> tuple[bool, str]:
+    """Run an FFmpeg command via subprocess.
 
-    return " ".join(cmd_parts)
+    Issue 2 fix: previously the render pipeline only built the command string
+    and stored it; nothing was ever executed. Returns (success, combined_output).
+    """
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if proc.returncode != 0:
+            return False, proc.stderr or proc.stdout or "FFmpeg failed with no output"
+        return True, proc.stdout
+    except subprocess.TimeoutExpired:
+        return False, f"FFmpeg timed out after {timeout}s"
+    except FileNotFoundError:
+        return False, "ffmpeg binary not found on PATH"
+    except Exception as e:
+        return False, str(e)
 
 
 def generate_ass_captions(scenes: list[dict]) -> str:
-    """Generate ASS (Advanced SubStation Alpha) subtitle content from scene data.
+    """Generate ASS subtitle content from scene data.
 
     Each scene dict should have 'text' and optionally 'estimated_duration'.
     Returns the complete ASS file content as a string.
@@ -115,7 +165,7 @@ def generate_ass_captions(scenes: list[dict]) -> str:
 
     current_time = 0.0
     for scene in scenes:
-        duration = scene.get("estimated_duration", 8.0)
+        duration = float(scene.get("estimated_duration", 8.0) or 8.0)
         text = scene.get("text", "")
 
         start_h = int(current_time // 3600)
